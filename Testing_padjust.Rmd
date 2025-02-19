@@ -1,0 +1,177 @@
+---
+title: "Testing_padjust"
+output: html_document
+date: "2023-12-12"
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(tidyr)
+library(pastecs)
+library(Rfast)
+library(reshape2)
+'%notin%' = function(x, y) !(x %in% y)
+```
+#T-tests for metaplots
+#get filenames
+```{bash}
+# cd "/Users/tamchow/Library/CloudStorage/OneDrive-UniversityofEdinburgh/NGS/20230317dTPR_met_analysis/Metaplots final/"
+cd "/Users/tamchow/Library/CloudStorage/OneDrive-UniversityofEdinburgh/NGS/20230317dTPR_met_analysis/Not metaplots/Boxwhisker/"
+ls *.txt > files.txt
+```
+#load data
+```{r}
+working_directory <- "/Users/tamchow/Library/CloudStorage/OneDrive-UniversityofEdinburgh/NGS/20230317dTPR_met_analysis/Metaplots final/"
+filenamesread <- read.csv(file = paste0(working_directory,"files.txt"), header = FALSE, colClasses = "character", col.names = "Filenames") %>% filter(Filenames %notin% c("files.txt", "other unwanted files and folders"))
+filenames <- filenamesread$Filenames
+rm(filenamesread)
+
+#combines all tables into one dataframe. you need to adjust colClasses to the correct genotype group size (i.e. 3 genotypes need to be rep("numeric", 3)) and for measure.vars (i.e. 3 genotypes need to be seq(from = 3,to = 5, by = 1))
+final_table <- data_frame()
+col_classes = c("character", "numeric", rep("numeric", 9))
+for (fileX in filenames) {
+  text = readLines(paste0(working_directory, fileX))
+  text <- gsub(" ", "", text, fixed = TRUE)
+  text <- gsub("\t\t", "\t", text, fixed = TRUE)
+  table1 = read.delim(
+    text = text,
+    header = TRUE,
+    row.names = NULL,
+    colClasses = col_classes
+  )
+  table1 <- table1 %>% mutate(
+    continuous = case_when(
+      region == "upstream" ~ bin + 0,
+      region == "central" ~ bin + 200,
+      region == "downstream" ~ bin + 400,
+      TRUE ~ as.double(bin)
+    )
+  ) %>%
+    mutate(class = paste(fileX)) %>%
+    melt(
+      id.vars = c("region", "bin", "continuous", "class"),
+      variable.name = "Genotype_Rep"
+    )
+  table1$Genotype_Rep <-  gsub("^.*\\.(.*rep.)", "\\1", table1$Genotype_Rep)
+  table1$Genotype <-  gsub("^(.*)_rep.*", "\\1", table1$Genotype_Rep)
+  table1$class <-  gsub("^.*Trend-(.*)\\.txt", "\\1", table1$class)
+  table1$value <- as.numeric(table1$value)
+  
+  final_table <- bind_rows(final_table, table1)
+  rm(table1)
+}
+```
+
+```{r}
+relevantbins_elements <- final_table %>%
+  # filter(continuous > 150 & continuous < 275) %>%
+  filter(continuous > 199 & continuous < 225) %>%
+  group_by(class, Genotype_Rep) %>%
+  mutate(average = mean(value), stdev = sd(value)) %>%
+  ungroup()
+
+avgpersample <- relevantbins_elements %>% 
+  filter(bin == 0) %>% 
+  select(class, Genotype, Genotype_Rep, average, stdev)
+
+TEfamilies <- as.vector(unique(avgpersample$class))
+
+class_average <- function(df, group) {
+  group_df <- df %>% filter(Genotype == group)
+  ret <- group_df %>% 
+    select(class, average) %>% 
+    dcast(class ~ average, value.var = "average")
+  colnames(ret) <- c("class", group_df$Genotype_Rep)
+  ret
+}
+
+
+extract_row <- function(df, i) {
+  unlist(as.numeric(df[i, 2:ncol(df)]))
+}
+pvalue_params = c("p.value", "statistic")
+Pvalues <- data.frame()
+for (element in TEfamilies) {
+  table2 <- avgpersample %>% filter(class == element)
+  wt_values <- class_average(table2, "dTPRctl")
+  mut_values <- class_average(table2, "dTPRmut")
+  refko_values <- class_average(table2, "Spocd1KO")
+  wt_vs_mut_pval <- t.test(extract_row(wt_values, 1), extract_row(mut_values, 1))
+  wt_vs_refko_pval <- t.test(extract_row(wt_values, 1), extract_row(refko_values, 1))
+  pvals_df <- tibble(
+    class = wt_values$class,
+    ctrl_vs_Spocd1dTPR_pval = wt_vs_mut_pval[["p.value"]],
+    ctrl_vs_Spocd1dTPR_stat = wt_vs_mut_pval[["statistic"]],
+    ctrl_vs_Spocd1KO_pval = wt_vs_refko_pval[["p.value"]],
+    ctrl_vs_Spocd1KO_stat = wt_vs_refko_pval[["statistic"]]
+  )
+  Pvalues <- bind_rows(Pvalues, purrr::reduce(list(wt_values, mut_values, refko_values, pvals_df), 
+                                              left_join, by = "class"))
+  Pvalues$ctrl_vs_Spocd1dTPR_padj_fdr <- p.adjust(Pvalues$ctrl_vs_Spocd1dTPR_pval, method="fdr")
+  Pvalues$ctrl_vs_Spocd1dTPR_padj_holm <- p.adjust(Pvalues$ctrl_vs_Spocd1dTPR_pval, method="holm")
+  Pvalues$ctrl_vs_Spocd1KO_padj_fdr <- p.adjust(Pvalues$ctrl_vs_Spocd1KO_pval, method="fdr")
+  Pvalues$ctrl_vs_Spocd1KO_padj_holm <- p.adjust(Pvalues$ctrl_vs_Spocd1KO_pval, method="holm")
+}
+
+write.csv(Pvalues,
+          file = paste0(working_directory, "average_first25binsElement.csv"))
+```
+
+#Boxplot new data Xinyu load data
+```{r}
+working_directory <- "/Users/tamchow/Library/CloudStorage/OneDrive-UniversityofEdinburgh/NGS/20230317dTPR_met_analysis/Not metaplots/Boxwhisker/"
+filenamesread <- read.csv(file = paste0(working_directory,"files.txt"), header = FALSE, colClasses = "character", col.names = "Filenames") %>% filter(Filenames %notin% c("files.txt", "other unwanted files and folders"))
+filenames <- filenamesread$Filenames
+rm(filenamesread)
+
+col_classes <- c(rep("NULL", 9), rep(c("numeric", "NULL"), 10))
+col_classes_alt <- c(rep("NULL", 12), rep("numeric", 10))
+na_strings <- c("NA", "NaN", "null", "Null", "NULL", "NotFound")
+
+final_table <- data_frame()
+fileX <- filenames[1]
+for (fileX in filenames) {
+  print(fileX)
+  table1 = read.delim(
+    paste0(working_directory, fileX),
+    header = TRUE,
+    row.names = NULL,
+    na.strings = na_strings,
+    colClasses = if (grepl(".*?_(AllProbes|intergenic)\\.txt", fileX)) {
+      col_classes_alt
+    } else {
+      col_classes
+    }
+  ) %>%
+    summarise(across(everything(), \(x) mean(x, na.rm = TRUE))) %>%
+    rename_with(\(x) gsub("Mean.", "", x, fixed = TRUE)) %>%
+    mutate(class = gsub("^.*FeatureReport_(.*)\\.txt$", "\\1", fileX)) %>% relocate(class)
+  
+  wt_values <- unlist(table1 %>% select(starts_with("dTPRctl")))
+  mut_values <- unlist(table1 %>% select(starts_with("dTPRmut")))
+  refko_values <- unlist(table1 %>% select(starts_with("Spocd1KO")))
+  wt_vs_mut_pval <- t.test(wt_values, mut_values)
+  wt_vs_refko_pval <- t.test(wt_values, refko_values)
+  pvals_df <- tibble(
+    class = unlist(table1$class),
+    ctrl_vs_Spocd1dTPR_pval = wt_vs_mut_pval[["p.value"]],
+    ctrl_vs_Spocd1dTPR_stat = wt_vs_mut_pval[["statistic"]],
+    ctrl_vs_Spocd1KO_pval = wt_vs_refko_pval[["p.value"]],
+    ctrl_vs_Spocd1KO_stat = wt_vs_refko_pval[["statistic"]]
+  )
+  final_table <- bind_rows(final_table, left_join(table1, pvals_df, by = "class"))
+  rm(table1)
+}
+
+final_table$ctrl_vs_Spocd1dTPR_padj_fdr <- p.adjust(final_table$ctrl_vs_Spocd1dTPR_pval, method="fdr")
+final_table$ctrl_vs_Spocd1dTPR_padj_holm <- p.adjust(final_table$ctrl_vs_Spocd1dTPR_pval, method="holm")
+final_table$ctrl_vs_Spocd1KO_padj_fdr <- p.adjust(final_table$ctrl_vs_Spocd1KO_pval, method="fdr")
+final_table$ctrl_vs_Spocd1KO_padj_holm <- p.adjust(final_table$ctrl_vs_Spocd1KO_pval, method="holm")
+
+write.csv(final_table,
+          file = paste0(working_directory, "average_boxwhiskers.csv"))
+```
+
+
